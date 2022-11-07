@@ -3,6 +3,8 @@ tiny/tiny
 tiny/cgi-bin/adder
 proxy
 echo/
+.noproxy/
+.proxy/
 
 # VScode
 .vscode
