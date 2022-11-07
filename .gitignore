@@ -4,6 +4,9 @@ tiny/cgi-bin/adder
 proxy
 echo/
 
+# VScode
+.vscode
+
 # MacOS
 .DS_Store
 .AppleDouble

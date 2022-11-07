@@ -32,10 +32,8 @@ int main(int argc, char **argv) {
   listenfd = Open_listenfd(argv[1]);
   while (1) {
     clientlen = sizeof(clientaddr);
-    connfd = Accept(listenfd, (SA *)&clientaddr,
-                    &clientlen);  // line:netp:tiny:accept
-    Getnameinfo((SA *)&clientaddr, clientlen, hostname, MAXLINE, port, MAXLINE,
-                0);
+    connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);  // line:netp:tiny:accept
+    Getnameinfo((SA *)&clientaddr, clientlen, hostname, MAXLINE, port, MAXLINE, 0);
     printf("Accepted connection from (%s, %s)\n", hostname, port);
     doit(connfd);   // line:netp:tiny:doit
     Close(connfd);  // line:netp:tiny:close
@@ -119,6 +117,7 @@ void read_requesthdrs(rio_t *rp)
   char buf[MAXLINE];
 
   Rio_readlineb(rp, buf, MAXLINE);
+  printf("%s", buf);
   while(strcmp(buf, "\r\n")) {  // 0이 아닌 값(true)이 나올 때. 즉, readline했을 때 값이 "\r\n"가 아닐 때.
     Rio_readlineb(rp, buf, MAXLINE);  // 읽고서,
     printf("%s", buf);  // 그냥 서버측 표춘 출력으로 출력해버림
@@ -195,6 +194,8 @@ void get_filetype(char *filename, char *filetype)
     strcpy(filetype, "image/png");
   else if (strstr(filename, ".jpg"))
     strcpy(filetype, "image/jpeg");
+  else if (strstr(filename, ".mp4"))
+    strcpy(filetype, "video/mp4");
   else
     strcpy(filetype, "text/plain");
 }
