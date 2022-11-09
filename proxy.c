@@ -22,6 +22,13 @@ size_t total_cache_size = 0;
 cache_data *nil;
 /* end of declaration */
 
+/* declaration for thread variable arguments*/
+typedef struct vargs_t {
+   int connfd;
+   char hostname[MAXLINE], port[MAXLINE];
+} vargs_t;
+/* end of declaration for thread variable arguments */
+
 void doit(int fd);
 int collect_requesthdrs(rio_t *rp, char *headers);
 int parse_uri(char *uri, char *host, char *port, char *filename);
@@ -35,13 +42,14 @@ void push_cache_node(cache_data *node);
 void delete_cache_node(cache_data *node);
 
 void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longmsg);
+void *thread(void *vargp);
 
 int main(int argc, char **argv) {
   int listenfd, connfd;
   char hostname[MAXLINE], port[MAXLINE];
-  socklen_t clientlen;
-  struct sockaddr_storage clientaddr;
-  cache_data *node; int n;
+  socklen_t clientlen; struct sockaddr_storage clientaddr;
+  pthread_t tid;
+  vargs_t *vargs;
 
   /* Check command line args */
   if (argc != 2) {
@@ -56,20 +64,42 @@ int main(int argc, char **argv) {
   listenfd = Open_listenfd(argv[1]);
   while (1) {
     clientlen = sizeof(clientaddr);
-    connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);  // line:netp:tiny:accept
+
+    connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);
     Getnameinfo((SA *)&clientaddr, clientlen, hostname, MAXLINE, port, MAXLINE, 0);
     printf("@ Accepted connection from (%s, %s)\n", hostname, port);
-    doit(connfd);   // line:netp:tiny:doit
-    Close(connfd);  // line:netp:tiny:close
-    printf("@ Close connection to (%s, %s)\n", hostname, port);
-    printf("<CACHE LIST> total_cache_size : %d\n", total_cache_size);\
-    node = nil; n = 1;
-    while((node = node->next) != nil) {
-      printf("%d) %-40s  ->  %d bytes\n", n++, node->uri, node->body_size);
-    }
-    printf("\n");
+
+    vargs = (vargs_t *)malloc(sizeof(vargs_t));
+    strcpy(vargs->hostname, hostname);
+    strcpy(vargs->port, port);
+    vargs->connfd = connfd;
+    Pthread_create(&tid, NULL, thread, (void *)vargs);
   }
   free(nil);
+}
+/* Tread routine */
+void *thread(void *vargp) {
+  vargs_t *vargs = (vargs_t *)vargp;
+  char hostname[MAXLINE], port[MAXLINE];
+  cache_data *node; int n;
+
+  int connfd = vargs->connfd;
+  strcpy(hostname, vargs->hostname);
+  strcpy(port, vargs->port);
+  Pthread_detach(pthread_self());
+  Free(vargp);
+
+  doit(connfd);
+
+  Close(connfd);
+  printf("@ Close connection to (%s, %s)\n", hostname, port);
+  printf("<CACHE LIST> total_cache_size : %d\n", total_cache_size);\
+  node = nil; n = 1;
+  while((node = node->next) != nil) {
+    printf("%d) %-40s  ->  %d bytes\n", n++, node->uri, node->body_size);
+  }
+  printf("\n");
+  return NULL;
 }
 
 void forward_request(int clientfd, char *method, char *filename, char *host, char *port, char *headers)
