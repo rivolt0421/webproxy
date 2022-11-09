@@ -5,6 +5,7 @@ proxy
 echo/
 .noproxy/
 .proxy/
+tiny/
 
 # VScode
 .vscode

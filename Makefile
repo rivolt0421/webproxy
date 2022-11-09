@@ -26,4 +26,5 @@ handin:
 
 clean:
 	rm -f *~ *.o proxy core *.tar *.zip *.gzip *.bzip *.gz *.png *.mp4 *.jpg *.jpeg *.html
+	rm -rf .noproxy/ .proxy/
 

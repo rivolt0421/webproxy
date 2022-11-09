@@ -9,25 +9,49 @@
 static const char *user_agent_hdr =
     "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:10.0.3) Gecko/20120305 Firefox/10.0.3";
 
+/* declaration for cache */
+typedef struct cache_data {
+  struct cache_data *prev;
+  struct cache_data *next;
+  size_t body_size;
+  void *src;
+  char uri[1024];
+} cache_data;
+
+size_t total_cache_size = 0;
+cache_data *nil;
+/* end of declaration */
+
 void doit(int fd);
-void forward_request(int clientfd, char *method, char *filename, char *host, char *port, char *headers);
-void serve_response(rio_t *rp, int fd);
-void clienterror(int fd, char *cause, char *errnum, char *shortmsg,
-                 char *longmsg);
+int collect_requesthdrs(rio_t *rp, char *headers);
 int parse_uri(char *uri, char *host, char *port, char *filename);
-int read_requesthdrs(rio_t *rp, char *headers);
+void forward_request(int clientfd, char *method, char *filename, char *host, char *port, char *headers);
+
+cache_data *is_cached(char *uri);
+void serve_fresh_response(rio_t *rp, int connfd, char *uri);
+void serve_cached_response(int fd, cache_data *node);
+void do_cache(void *srcp, size_t src_size, char *uri);
+void push_cache_node(cache_data *node);
+void delete_cache_node(cache_data *node);
+
+void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longmsg);
 
 int main(int argc, char **argv) {
   int listenfd, connfd;
   char hostname[MAXLINE], port[MAXLINE];
   socklen_t clientlen;
   struct sockaddr_storage clientaddr;
+  cache_data *node; int n;
 
   /* Check command line args */
   if (argc != 2) {
     fprintf(stderr, "usage: %s <port>\n", argv[0]);
     exit(1);
   }
+
+  // init sentinel node
+  nil = (cache_data *)malloc(sizeof(cache_data));
+  nil->next = nil; nil->prev = nil;
 
   listenfd = Open_listenfd(argv[1]);
   while (1) {
@@ -37,55 +61,16 @@ int main(int argc, char **argv) {
     printf("@ Accepted connection from (%s, %s)\n", hostname, port);
     doit(connfd);   // line:netp:tiny:doit
     Close(connfd);  // line:netp:tiny:close
+    printf("@ Close connection to (%s, %s)\n", hostname, port);
+    printf("<CACHE LIST> total_cache_size : %d\n", total_cache_size);\
+    node = nil; n = 1;
+    while((node = node->next) != nil) {
+      printf("%d) %-40s  ->  %d bytes\n", n++, node->uri, node->body_size);
+    }
+    printf("\n");
   }
+  free(nil);
 }
-
-void doit(int fd) {
-  int clientfd;
-  char buf[MAXLINE];
-  char method[MAXLINE], uri[MAXLINE], version[MAXLINE];
-  char host[MAXLINE], port[MAXLINE], filename[MAXLINE];
-  rio_t rio;
-
-  /* Read request line and headers */
-  Rio_readinitb(&rio, fd);            // 새로운 rio (connfd).
-  Rio_readlineb(&rio, buf, MAXLINE);  // 첫번째 줄(request line) 읽어서 buf에 넣어줌.
-  printf("<Incoming Request headers>\n");
-  printf("%s", buf);
-    
-  sscanf(buf, "%s %s %s", method, uri, version); // buf에서 띄어쓰기로 구분된 문자열 3개를 읽어서 뒤의 변수에 넣어줌.
-  if(!strlen(method) || !strlen(uri) || !strlen(version)) {
-    clienterror(fd, method, "400", "Bad request",
-      "Request could not be understood by the server");
-    return;  
-  }
-
-  strcpy(buf, "");
-  if (!read_requesthdrs(&rio, buf)) {
-    clienterror(fd, method, "400", "Bad request",
-              "Request could not be understood by the server");
-    return;    
-  }; // valid check, find addintional header
-  /* end of Read request line and headers */
-
-  /* make request to server */
-  if (!parse_uri(uri, host, port, filename)) {
-    clienterror(fd, method, "400", "Bad request",
-              "Request could not be understood by the server");
-    return;    
-  }
-  if ((clientfd = Open_clientfd(host, port)) < 0)
-    return;
-  forward_request(clientfd, method, filename, host, port, buf);
-  /* end of request to server */
-
-  /* redirect response to client */
-  Rio_readinitb(&rio, clientfd);  // 새로운 rio (clientfd).
-  serve_response(&rio, fd);
-  Close(clientfd);
-   /* end of redirect response to client */
-}
-
 
 void forward_request(int clientfd, char *method, char *filename, char *host, char *port, char *headers)
 { 
@@ -106,8 +91,75 @@ void forward_request(int clientfd, char *method, char *filename, char *host, cha
     printf(">>>>>>>> Request headers to server\n");
     printf("%s", buf);
 }
-void serve_response(rio_t *rp, int fd)
-{                       // rio has clientfd.
+
+void doit(int fd) {
+  int clientfd;
+  char buf[MAXLINE];
+  char method[MAXLINE], uri[MAXLINE], version[MAXLINE];
+  char host[MAXLINE], port[MAXLINE], filename[MAXLINE];
+  rio_t rio;
+  cache_data *node;
+
+  /* Read request line and headers */
+  Rio_readinitb(&rio, fd);            // 새로운 rio (connfd).
+  Rio_readlineb(&rio, buf, MAXLINE);  // 첫번째 줄(request line) 읽어서 buf에 넣어줌.
+  printf("<Incoming Request headers>\n");
+  printf("%s", buf);
+    
+  sscanf(buf, "%s %s %s", method, uri, version); // buf에서 띄어쓰기로 구분된 문자열 3개를 읽어서 뒤의 변수에 넣어줌.
+  if(!strlen(method) || !strlen(uri) || !strlen(version)) {
+    clienterror(fd, method, "400", "Bad request",
+      "Request could not be understood by the server");
+    return;  
+  }
+
+  strcpy(buf, "");
+  if (!collect_requesthdrs(&rio, buf)) {  // valid check, find addintional header
+    clienterror(fd, method, "400", "Bad request",
+              "Request could not be understood by the server");
+    return;    
+  }
+  /* end of Read request line and headers */
+
+  /* Make response */
+  // if this request is cached:
+  if ((node = is_cached(uri)) != nil) {
+    printf("\n                   ██████╗ █████╗  ██████╗██╗  ██╗███████╗    ██╗  ██╗██╗████████╗    ██╗\n ░▄▌░░░░░░░░░▄    ██╔════╝██╔══██╗██╔════╝██║  ██║██╔════╝    ██║  ██║██║╚══██╔══╝    ██║\n ████████████▄    ██║     ███████║██║     ███████║█████╗      ███████║██║   ██║       ██║\n ░░░░░░░░▀▐████   ██║     ██╔══██║██║     ██╔══██║██╔══╝      ██╔══██║██║   ██║       ╚═╝\n ░░░░░░░░░░░▐██▌  ╚██████╗██║  ██║╚██████╗██║  ██║███████╗    ██║  ██║██║   ██║       ██╗\n                   ╚═════╝╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝╚══════╝    ╚═╝  ╚═╝╚═╝   ╚═╝       ╚═╝\n\n");
+    serve_cached_response(fd, node);
+  }
+  // not cached:
+  else {
+    /* make request to server */
+    if (!parse_uri(uri, host, port, filename)) {
+      clienterror(fd, method, "400", "Bad request",
+                "Request could not be understood by the server");
+      return;    
+    }
+
+    if ((clientfd = Open_clientfd(host, port)) < 0)
+      return;
+    forward_request(clientfd, method, filename, host, port, buf);
+    /* end of request to server */
+
+    /* redirect response to client */
+    Rio_readinitb(&rio, clientfd);  // 새로운 rio (clientfd).
+    serve_fresh_response(&rio, fd, uri);
+    Close(clientfd);
+   /* end of redirect response to client */
+  }
+  /* end of make response */
+}
+
+cache_data *is_cached(char *uri) {
+  cache_data *node = nil->next;
+  while(node != nil && strcmp(uri, node->uri)) {
+    node = node->next;
+  }
+  return node;
+}
+
+void serve_fresh_response(rio_t *rp, int connfd, char *uri)
+{                      // rio has clientfd.
   char *srcp; // source pointer
   size_t src_size = 0;
   char buf[MAXLINE];
@@ -115,7 +167,7 @@ void serve_response(rio_t *rp, int fd)
   printf("<<<<<<<< Response headers from server\n");
   // read & make reponse line
   Rio_readlineb(rp, buf, MAXLINE);
-  Rio_writen(fd, buf, strlen(buf));
+  Rio_writen(connfd, buf, strlen(buf));
     printf("%s", buf);
 
   // read & make respone headers
@@ -124,7 +176,7 @@ void serve_response(rio_t *rp, int fd)
     if (strstr(buf, "Content-Length")){
       src_size = atoi(rindex(buf, ':')+2);
     }
-    Rio_writen(fd, buf, strlen(buf));
+    Rio_writen(connfd, buf, strlen(buf));
     printf("%s", buf);
   }
 
@@ -132,10 +184,78 @@ void serve_response(rio_t *rp, int fd)
   if (src_size) {
     srcp = malloc(src_size);
     Rio_readnb(rp, srcp, src_size);
-    Rio_writen(fd, srcp, src_size);
-    free(srcp);
-    printf("--- response contents is sent to client. ---\n\n");
+
+    if (src_size <= MAX_OBJECT_SIZE) {
+      do_cache(srcp, src_size, uri);
+      Rio_writen(connfd, srcp, src_size);
+    }
+    else {
+      Rio_writen(connfd, srcp, src_size);
+      free(srcp);
+    }
+    printf("--- %d bytes of contents is sent to client. ---\n\n", src_size);
   }
+}
+
+void serve_cached_response(int fd, cache_data *node) {
+  char buf[MAXLINE];
+  /* response headers */
+  // make request line
+  sprintf(buf, "HTTP/1.0 200 OK\r\n");
+  // make request headers
+  sprintf(buf, "%sConnection: close\r\n", buf);
+  // sprintf(buf, "%sContent-Length: %d\r\n", buf, size);
+  // sprintf(buf, "%sContent-Type: %s\r\n\r\n", buf, filetype);    // use of filetype
+  sprintf(buf, "%s\r\n", buf);
+
+  // send
+  Rio_writen(fd, buf, strlen(buf));
+    printf("Response headers:\n");
+    printf("%s", buf);
+
+  /* response body */
+  Rio_writen(fd, node->src, node->body_size);
+  printf("--- %d bytes of cached contents is sent to client. ---\n\n", node->body_size);
+
+  /* make this node fresh */
+  delete_cache_node(node);
+  push_cache_node(node);
+}
+
+void push_cache_node(cache_data *node) {
+    // 1. 내 꺼
+  node->next = nil->next;
+  node->prev = nil;
+  // 2. 남의 꺼
+  nil->next->prev = node;
+  nil->next = node;
+}
+
+void delete_cache_node(cache_data *node) {
+  node->prev->next = node->next;
+  node->next->prev = node->prev;
+}
+
+void do_cache(void *srcp, size_t src_size, char *uri) {
+                          // rio has clientfd.
+  /* make cache node */
+  cache_data *node = (cache_data *)malloc(sizeof(cache_data));
+  node->body_size = src_size;
+  strcpy(node->uri, uri);
+  node->src = srcp;
+
+  /* insert to cache node list */
+  cache_data *oldest_node;
+  while (total_cache_size + node->body_size > MAX_CACHE_SIZE) {  // 캐시 공간이 충분할 때 까지 가장 오래된 노드 지운다.
+    // 맨 끝 노드를 지운다.
+    oldest_node = nil->prev;
+    delete_cache_node(oldest_node);
+    total_cache_size -= oldest_node->body_size;
+    free(oldest_node->src);
+    free(oldest_node);
+  }
+  push_cache_node(node);
+  total_cache_size += src_size;
 }
 
 void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longmsg)
@@ -181,7 +301,7 @@ int parse_uri(char *uri, char *host, char *port, char *filename)
   return 1;
 }
 
-int read_requesthdrs(rio_t *rp, char *headers)
+int collect_requesthdrs(rio_t *rp, char *headers)
 {
   char buf[MAXLINE], name[MAXLINE], data[MAXLINE];
   char *str = "User-Agent:/Connection:/Proxy-Connection:";
